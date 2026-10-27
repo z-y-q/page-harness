@@ -13,6 +13,7 @@ Context
 
 Tools (MCP server "page-harness")
 - page_state, page_click, page_input, page_select, page_scroll: read and operate the user's page. They only work while the user has allowed page control; if a call says control is off, carry on without it. Always call page_state first and pass its stateId to actions.
+- network_list, network_get: the user's real browser traffic captured at the proxy (URLs, headers, cookies, request/response bodies). The best source for "which APIs does this page call" — make your own HTTP requests only when the capture does not answer it, and expect outside requests to lack the browser's cookies (anti-bot protection may block them).
 - write_artifact, read_artifact, list_artifacts, set_artifact_preview: deliverables such as plans, reports, specs, mockups (.md, .html, .json, images). Writing the same name again creates a new version.
 - ask_question, ask_form: ask the user when you genuinely need a decision or input. The call waits for the answer.
 - live_update: only for "## Live request" messages (see the instructions that come with them).
@@ -103,6 +104,7 @@ How to deliver
 
 Other tools (MCP server "page-harness")
 - page_state, page_click, page_input, page_select, page_scroll: read and operate the page. They only work while the user has allowed page control; if control is off, work from the picked elements and say what you could not check.
+- network_list, network_get: the user's real browser traffic captured at the proxy (URLs, headers, cookies, request/response bodies). Prefer them over fetching the site yourself: your own requests lack the browser's cookies and are often blocked by anti-bot protection. The capture exists only after the user has browsed through the page-harness proxy.
 - ask_question, ask_form: ask the user when you genuinely need a decision or input.
 
 Style

@@ -23,6 +23,7 @@ import { LiveError } from './live'
 import { log } from './log'
 import { handleMcp } from './mcp'
 import { createProxy, RELAY_PREFIX } from './proxy'
+import type { NetworkRecorder } from './network'
 import type { Uploads } from './uploads'
 import { MAX_UPLOAD_BYTES } from './uploads'
 
@@ -76,6 +77,8 @@ export interface AppOptions {
   lang?: Lang
   /** Origins allowed to frame the app page; the dock posts quoted elements to them. */
   embedOrigins?: string[]
+  /** Captures proxy traffic for the agent's network_list / network_get tools. */
+  network?: NetworkRecorder
 }
 
 class HttpError extends Error {
@@ -162,7 +165,7 @@ export async function startServers(o: AppOptions): Promise<Servers> {
   const controlOrigin = (req: IncomingMessage) => o.auth.origin(hostname(req), o.controlPort)
   const appOrigin = (req: IncomingMessage) => o.auth.origin(hostname(req), o.appPort)
   const embedOrigins = o.embedOrigins ?? []
-  const proxy = o.target ? createProxy({ target: o.target, cookieName: o.auth.cookieName, controlOrigin, keepHost: o.keepHost, scheme: o.auth.scheme, embedOrigins }) : null
+  const proxy = o.target ? createProxy({ target: o.target, cookieName: o.auth.cookieName, controlOrigin, keepHost: o.keepHost, scheme: o.auth.scheme, embedOrigins, network: o.network }) : null
 
   // ---------- app port ----------
   const pageScripts: Record<string, string> = {

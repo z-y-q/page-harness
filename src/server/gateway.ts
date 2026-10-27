@@ -30,6 +30,7 @@ import { AskManager } from './asks'
 import type { Auth, McpScope } from './auth'
 import { LiveError, requestText, type LiveManager, type MarkerGuard } from './live'
 import { log } from './log'
+import type { NetworkRecorder } from './network'
 import { MCP_SERVER_NAME, type ToolHost } from './mcp'
 import type { PageBridge } from './pageBridge'
 import { MAX_REVIEW_ITEMS, type ReviewStore } from './review'
@@ -64,6 +65,8 @@ export interface GatewayOptions {
   shareUrl?: string
   /** Review-only: never start an agent CLI. */
   noAgent?: boolean
+  /** Traffic captured at the app-port proxy, exposed to the agent over MCP. */
+  network: NetworkRecorder
 }
 
 /** Broadcasts teammates get; chats, Live sessions and page control stay with the owner. */
@@ -626,6 +629,7 @@ export class Gateway {
       livePatches: (scope, sid, variants) => this.o.live.setPatchVariants(scope.chatId, sid, variants),
       artifactWritten: (scope, name, version) => this.emit(scope.chatId, scope.turnId, { t: 'artifact', name, version }),
       previewArtifact: (_scope, name) => this.broadcastAll({ type: 'artifacts', artifacts: this.o.artifacts.list(), pinned: this.o.artifacts.pinned, changed: name, open: name }),
+      network: this.o.network,
     }
   }
 

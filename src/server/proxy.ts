@@ -5,6 +5,7 @@ import type { Duplex } from 'node:stream'
 import zlib from 'node:zlib'
 import { embedFrameAncestors, ensureEmbedFrameAncestors, injectHtml, relaxCsp, rewriteSetCookie, stripCookie } from './inject'
 import { log } from './log'
+import { BodyCapture, capText, headerMap, kindOf, MAX_RES_CHARS, storeBody, type NetworkRecorder } from './network'
 import { privateHost } from './review'
 
 export interface ProxyOptions {
@@ -18,6 +19,8 @@ export interface ProxyOptions {
   scheme?: 'http' | 'https'
   /** Origins allowed to frame the proxied page (--embed-origin). */
   embedOrigins?: readonly string[]
+  /** Records every request/response pair that flows through this proxy. */
+  network?: NetworkRecorder
 }
 
 const HOP_HEADERS = new Set([
@@ -197,6 +200,40 @@ export function createProxy(opts: ProxyOptions) {
 
   function handle(req: IncomingMessage, res: ServerResponse, relayTo?: URL) {
     const { client, ...where } = upstreamOf(relayTo)
+    const t0 = Date.now()
+    const rec = opts.network
+    const reqCap = rec ? new BodyCapture() : undefined
+    const entryId =
+      rec?
+        rec.start({
+          method: req.method ?? 'GET',
+          url: req.url ?? '/',
+          upstream: (relayTo ?? target).origin + (relayTo ? relayTo.pathname + relayTo.search : req.url ?? ''),
+          relayed: !!relayTo,
+          reqHeaders: headerMap(req.headers),
+        })
+        : 0
+    if (reqCap) req.on('data', (c: Buffer) => reqCap.add(c))
+    let recorded = false
+    const record = (f: {
+      status: number
+      contentType: string
+      resHeaders: Record<string, string>
+      resBody?: string
+      resTruncated?: boolean
+      resEncoded?: boolean
+      resBytes: number
+    }) => {
+      if (!rec || !entryId || recorded) return
+      recorded = true
+      const reqText = reqCap?.requestText()
+      rec.finish(entryId, {
+        ...f,
+        ms: Date.now() - t0,
+        reqBody: reqText?.text,
+        reqTruncated: reqText?.truncated,
+      })
+    }
     const upstream = client.request(
       {
         ...where,
@@ -211,6 +248,29 @@ export function createProxy(opts: ProxyOptions) {
         const isHtml =
           !relayTo && /text\/html|application\/xhtml\+xml/i.test(type) && req.method !== 'HEAD' && up.statusCode !== 204 && up.statusCode !== 304
         if (!isHtml) {
+          const contentType = type || 'application/octet-stream'
+          const resCap = rec ? new BodyCapture() : undefined
+          if (resCap) up.on('data', (c: Buffer) => resCap.add(c))
+          if (rec && resCap) {
+            up.on('end', () => {
+              let resBody: string | undefined
+              let resTruncated: boolean | undefined
+              let resEncoded: boolean | undefined
+              const kind = kindOf(contentType, req.url ?? '/')
+              if (storeBody(kind)) {
+                const encoding = String(up.headers['content-encoding'] ?? '').toLowerCase().trim()
+                const raw = encoding ? decompress(resCap.buffer, encoding) : resCap.buffer
+                if (!raw) resEncoded = true
+                else {
+                  const r = resCap.responseText(raw)
+                  resBody = r.text
+                  resTruncated = r.truncated
+                }
+              }
+              record({ status: up.statusCode ?? 0, contentType, resHeaders: headerMap(up.headers), resBody, resTruncated, resEncoded, resBytes: resCap.bytes })
+            })
+            up.on('error', () => record({ status: 0, contentType, resHeaders: headerMap(up.headers), resBytes: 0 }))
+          }
           res.writeHead(up.statusCode ?? 502, up.statusMessage, responseHeaders(up, req, false, relayTo))
           up.pipe(res)
           return
@@ -225,18 +285,35 @@ export function createProxy(opts: ProxyOptions) {
           if (size <= MAX_HTML_BYTES) return
           passthrough = true
           log.warn(`HTML over ${MAX_HTML_BYTES >> 20} MB passed through without the overlay`)
+          record({ status: up.statusCode ?? 0, contentType: type, resHeaders: headerMap(up.headers), resTruncated: true, resBytes: size })
           res.writeHead(up.statusCode ?? 200, up.statusMessage, responseHeaders(up, req, false))
           for (const b of chunks) res.write(b)
           chunks.length = 0
           up.pipe(res)
         })
-        up.on('error', (e) => errorPage(res, req, e))
+        up.on('error', (e) => {
+          record({ status: 0, contentType: 'text/html', resHeaders: headerMap(up.headers), resBytes: 0, resBody: String(e?.message ?? e) })
+          errorPage(res, req, e)
+        })
         up.on('end', () => {
           if (passthrough) return
           const raw = Buffer.concat(chunks)
           const encoding = String(up.headers['content-encoding'] ?? '').toLowerCase().trim()
           const body = decompress(raw, encoding)
           const headers = responseHeaders(up, req, body !== null)
+          if (rec && body !== null) {
+            const capped = capText(body.toString('utf8'), MAX_RES_CHARS)
+            record({
+              status: up.statusCode ?? 0,
+              contentType: type,
+              resHeaders: headerMap(up.headers),
+              resBody: capped.text,
+              resTruncated: capped.truncated,
+              resBytes: raw.length,
+            })
+          } else if (rec) {
+            record({ status: up.statusCode ?? 0, contentType: type, resHeaders: headerMap(up.headers), resEncoded: true, resBytes: raw.length })
+          }
           if (body === null) {
             if (!warned.has(encoding)) {
               warned.add(encoding)
@@ -271,6 +348,7 @@ export function createProxy(opts: ProxyOptions) {
       },
     )
     upstream.on('error', (e) => {
+      record({ status: 0, contentType: '', resHeaders: {}, resBytes: 0, resBody: String(e?.message ?? e) })
       if (!relayTo) return errorPage(res, req, e)
       if (!res.headersSent) res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' })
       res.end(`page-harness relay: ${e.message}`)

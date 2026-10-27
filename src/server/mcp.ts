@@ -11,6 +11,7 @@ import type { ArtifactStore } from './artifacts'
 import { MAX_ARTIFACT_BYTES } from './artifacts'
 import { formatAnswer } from './asks'
 import type { McpScope } from './auth'
+import type { NetworkRecorder } from './network'
 import { LIVE_MAX_CHANGES, type LiveChange, type LiveVariant, type ReviewPatch } from '../shared/protocol'
 import { AGENT_AUTHOR, cleanPatch, reviewArtifactAllowed, type ReviewInput, type ReviewStore } from './review'
 import { normalizePath } from '../shared/paths'
@@ -26,6 +27,8 @@ export interface ToolHost {
   /** URL of the page the current turn was sent from. */
   pageUrl(scope: McpScope): string | undefined
   artifacts: ArtifactStore
+  /** Traffic captured at the app-port proxy (network_list / network_get). */
+  network: NetworkRecorder
   page(scope: McpScope, cmd: PageCmd): Promise<PageResult>
   ask(scope: McpScope, spec: AskSpec): Promise<AskAnswer>
   live(scope: McpScope, u: { sid: string; status: 'ready' | 'failed' | 'done'; variants?: LiveVariant[]; message?: string; partial?: boolean }): string
@@ -118,6 +121,69 @@ export function buildMcpServer(host: ToolHost, scope: McpScope): McpServer {
       inputSchema: { down: z.boolean().default(true), pages: z.number().min(0.1).max(10).optional(), index: z.number().int().min(0).optional(), stateId: z.string().optional() },
     },
     async ({ down, pages, index, stateId }) => guard(async () => pageText(await host.page(scope, { action: 'scroll', down, pages, index, stateId })))(),
+  )
+
+  // ---------- network ----------
+  server.registerTool(
+    'network_list',
+    {
+      title: 'List captured traffic',
+      description:
+        'Requests the browser made while the user browsed the page through page-harness, captured at the proxy with the real session cookies. This is the best source for "which APIs / endpoints does this page call" — requests you make yourself (curl, fetch) lack those cookies and are often blocked by anti-bot protection. Newest first. Filters: q (substring of the URL), kind (doc|json|text|script|style|image|font|other), limit (default 50).',
+      inputSchema: {
+        q: z.string().optional().describe('Substring of the URL (case-insensitive)'),
+        kind: z.string().optional().describe('doc|json|text|script|style|image|font|other'),
+        limit: z.number().int().min(1).max(200).optional(),
+      },
+    },
+    async ({ q, kind, limit }) =>
+      guard(() => {
+        const all = host.network.list({ q, kind, limit })
+        if (!all.length) {
+          return ok(
+            host.network.total() === 0
+              ? 'Nothing captured yet. Traffic is recorded only while the page is used through the page-harness proxy URL, and the buffer keeps the latest 400 requests.'
+              : 'No captured request matches the filter.',
+          )
+        }
+        const lines = all.map((e) => `[${e.id}] ${e.method} ${e.status || '…'} ${e.ms}ms ${e.kind} ${e.url}${e.relayed ? ' (relay)' : ''}`)
+        return ok(`Captured requests, newest first (${host.network.total()} in buffer):
+${lines.join('\n')}
+
+network_get {id} shows headers, cookies and bodies.`)
+      })(),
+  )
+  server.registerTool(
+    'network_get',
+    {
+      title: 'Read a captured request',
+      description:
+        'One captured request in full: URL, upstream, status, timing, request headers (cookies included), request body, response headers and response body. Textual bodies are decoded and capped at 160 KB; binary bodies (images, fonts) are not stored.',
+      inputSchema: {
+        id: z.number().int(),
+        bodyMax: z.number().int().min(500).max(60000).optional().describe('Characters of each body to show (default 20000)'),
+      },
+    },
+    async ({ id, bodyMax }) =>
+      guard(() => {
+        const e = host.network.get(id)
+        if (!e) return fail(`no captured request with id ${id}; call network_list first`)
+        const max = bodyMax ?? 20000
+        const cut = (s: string): string => (s.length > max ? s.slice(0, max) + `… (+${s.length - max} chars)` : s)
+        const block = (h: Record<string, string>): string => Object.entries(h).map(([k, v]) => `  ${k}: ${v}`).join('\n')
+        const parts: string[] = [
+          `${e.method} ${e.url}${e.relayed ? `\nupstream: ${e.upstream}` : ''}`,
+          `status ${e.status || '…'} · ${e.ms} ms · ${e.contentType || '?'} · ${e.kind} · ${new Date(e.t).toISOString()}`,
+          `request headers:\n${block(e.reqHeaders) || '  (none)'}`,
+        ]
+        if (e.reqBody !== undefined) parts.push(`request body (${e.reqBody.length} chars${e.reqTruncated ? ', truncated' : ''}):\n${cut(e.reqBody)}`)
+        parts.push(`response headers:\n${block(e.resHeaders) || '  (none)'}`)
+        if (e.resEncoded) parts.push(`response body: could not decode the content-encoding (${e.resBytes} bytes captured)`)
+        else if (e.resBody !== undefined)
+          parts.push(`response body (${e.resBody.length} chars stored${e.resTruncated ? ', hit the capture limit' : ''}):\n${cut(e.resBody)}`)
+        else parts.push(`response body: not stored (${e.resBytes} bytes; binary or non-textual)`)
+        return ok(parts.join('\n\n'))
+      })(),
   )
 
   // ---------- artifacts ----------

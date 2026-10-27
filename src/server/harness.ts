@@ -11,6 +11,7 @@ import { randomToken, type PublicScheme, Auth } from './auth'
 import { Gateway } from './gateway'
 import { LiveManager, MarkerGuard } from './live'
 import { log } from './log'
+import { NetworkRecorder } from './network'
 import { PageBridge } from './pageBridge'
 import { ReviewStore, detectMode } from './review'
 import { Team } from './team'
@@ -63,6 +64,8 @@ export interface Harness {
   bookmarkletToken: string
   gateway: Gateway
   auth: Auth
+  /** Traffic captured at the app-port proxy (network_list / network_get). */
+  network: NetworkRecorder
   close(): Promise<void>
 }
 
@@ -107,6 +110,7 @@ export async function startHarness(o: HarnessOptions): Promise<Harness> {
   const guard = new MarkerGuard(o.project)
   const bridge = new PageBridge()
   const review = new ReviewStore(dataDir, o.target?.host ?? '')
+  const network = new NetworkRecorder()
   const bookmarkletToken = randomToken(18)
   const shownHost = o.host === '0.0.0.0' || o.host === '::' || o.host === '127.0.0.1' ? 'localhost' : o.host
   const reachHost = o.publicHost || shownHost
@@ -133,6 +137,7 @@ export async function startHarness(o: HarnessOptions): Promise<Harness> {
     team,
     shareUrl,
     noAgent,
+    network,
   })
   if (o.liveGuardHook && !noAgent && !(await guard.installHook())) log.warn('--live-guard-hook needs a git repository')
 
@@ -154,6 +159,7 @@ export async function startHarness(o: HarnessOptions): Promise<Harness> {
     bookmarkletToken,
     lang: o.lang,
     embedOrigins: o.embedOrigins,
+    network,
   })
 
   let closed = false
@@ -170,6 +176,7 @@ export async function startHarness(o: HarnessOptions): Promise<Harness> {
     embedToken,
     gateway,
     auth,
+    network,
     async close() {
       if (closed) return
       closed = true
